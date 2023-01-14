@@ -126,6 +126,26 @@ fn update(_app: &App, model: &mut Model, update: Update) {
             500 as usize..=5000 as usize,
         ));
 
+        //ui.add(
+        egui::Grid::new("Atomic relations:").show(ui, |ui| {
+            ui.label("");
+            for i in 0..model.settings.rel.table.len() {
+                ui.label(format!("{}", i));
+            }
+            ui.end_row();
+            for i in 0..model.settings.rel.table.len() {
+                ui.label(format!("{}", i));
+                for j in 0..model.settings.rel.table[i].len() {
+                    ui.add(egui::Slider::new(
+                        &mut model.settings.rel.table[i][j],
+                        -0.5..=0.5,
+                    ));
+                }
+                ui.end_row();
+            }
+        })
+        //);
+
         //
 
         //drop(c);
