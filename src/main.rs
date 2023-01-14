@@ -35,6 +35,8 @@ fn init(app: &App, _window: window::Id) -> Model {
         rel,
         pn: num,
         pnt: num_t,
+        zoom: 1.0,
+        psize: 5.0,
     };
     let mut atoms: Vec<Atom> = vec![Atom::default(); num];
     let (bx, by) = app.window_rect().w_h();
@@ -66,6 +68,8 @@ fn restart(app: &App, _window: window::Id, n: usize, n_t: usize) -> Model {
         rel,
         pn: num,
         pnt: num_t,
+        zoom: m.settings.zoom,
+        psize: m.settings.psize,
     };
     let mut atoms: Vec<Atom> = vec![Atom::default(); n];
     let (bx, by) = app.window_rect().w_h();
@@ -105,8 +109,18 @@ fn update(_app: &App, model: &mut Model, update: Update) {
     let c = egui.begin_frame();
 
     egui::Window::new("Settings for particle life: ").show(&c, |ui| {
+        ui.label("Zoom:");
+        if ui.button("+").clicked() {
+            model.settings.zoom -= 0.1;
+        }
+        if ui.button("-").clicked() {
+            model.settings.zoom += 0.1;
+        }
         ui.label("Friction: ");
         ui.add(egui::Slider::new(&mut model.settings.friction, 0.01..=0.75));
+
+        ui.label("Particle size:");
+        ui.add(egui::Slider::new(&mut model.settings.psize, 1.0..=10.0));
 
         ui.label("Minumum distance:");
         ui.add(egui::Slider::new(&mut model.settings.r_min, 0.01..=0.9));
@@ -189,7 +203,7 @@ fn view(app: &App, model: &Model, frame: Frame) {
     draw.background().color(DARKSLATEGRAY);
     //draw.ellipse().color(STEELBLUE);
     for i in &model.atoms {
-        i.draw(&draw);
+        i.draw(&draw, model.settings.zoom);
     }
     draw.to_frame(app, &frame).unwrap();
     model.egui.draw_to_frame(&frame).unwrap();
@@ -203,6 +217,8 @@ struct Settings {
     rel: Relation,
     pn: usize,
     pnt: usize,
+    zoom: f32,
+    psize: f32,
 }
 #[derive(Copy, Clone, Debug)]
 struct Atom {
@@ -248,11 +264,11 @@ impl Atom {
     fn update(&mut self) {
         self.pos = self.pos + self.vel;
     }
-    fn draw(&self, d: &Draw) {
+    fn draw(&self, d: &Draw, z: f32) {
         let col = get_col(self.t);
         d.ellipse()
             .color(col)
-            .x_y(self.pos.x, self.pos.y)
+            .x_y(self.pos.x * z, self.pos.y * z)
             .w_h(5.0, 5.0);
     }
 }
