@@ -102,7 +102,7 @@ fn model(app: &App) -> Model {
 
 fn update(_app: &App, model: &mut Model, update: Update) {
     //-------------------EGUI-------------------
-    let mut egui = &mut model.egui;
+    let egui = &mut model.egui;
     //let set = &mut model.settings;
     egui.set_elapsed_time(update.since_start);
 
@@ -166,11 +166,17 @@ fn update(_app: &App, model: &mut Model, update: Update) {
     });
     //------------------------------------------
     if model.settings.pn != model.settings.num || model.settings.pnt != model.settings.num_t {
-        let mut dmod = restart(_app, model._window, model.settings.pn, model.settings.pnt);
+        let dmod = restart(_app, model._window, model.settings.pn, model.settings.pnt);
         model._window = dmod._window;
         model.atoms = dmod.atoms;
         //egui = &mut dmod.egui;
-        model.settings = dmod.settings;
+        if dmod.settings.rel.table.len() == model.settings.rel.table.len() {
+            let reld = model.settings.rel.table.clone();
+            model.settings = dmod.settings;
+            model.settings.rel.table = reld;
+        } else {
+            model.settings = dmod.settings;
+        }
     }
 
     for i in 0..model.atoms.len() {
@@ -186,7 +192,7 @@ fn update(_app: &App, model: &mut Model, update: Update) {
         model.atoms[i].update();
     }
 }
-fn events(_app: &App, model: &mut Model, event: WindowEvent) {
+fn events(_app: &App, _model: &mut Model, event: WindowEvent) {
     match event {
         KeyPressed(_k) => {
             //
@@ -203,7 +209,7 @@ fn view(app: &App, model: &Model, frame: Frame) {
     draw.background().color(DARKSLATEGRAY);
     //draw.ellipse().color(STEELBLUE);
     for i in &model.atoms {
-        i.draw(&draw, model.settings.zoom);
+        i.draw(&draw, model.settings.zoom, model.settings.psize);
     }
     draw.to_frame(app, &frame).unwrap();
     model.egui.draw_to_frame(&frame).unwrap();
@@ -264,12 +270,12 @@ impl Atom {
     fn update(&mut self) {
         self.pos = self.pos + self.vel;
     }
-    fn draw(&self, d: &Draw, z: f32) {
+    fn draw(&self, d: &Draw, z: f32, s: f32) {
         let col = get_col(self.t);
         d.ellipse()
             .color(col)
             .x_y(self.pos.x * z, self.pos.y * z)
-            .w_h(5.0, 5.0);
+            .w_h(s, s);
     }
 }
 struct Relation {
