@@ -37,13 +37,15 @@ fn init(app: &App, _window: window::Id) -> Model {
         pnt: num_t,
         zoom: 1.0,
         psize: 5.0,
+        pgen_t: PosInit::Bands,
     };
     let mut atoms: Vec<Atom> = vec![Atom::default(); num];
     let (bx, by) = app.window_rect().w_h();
     for i in 0..atoms.len() {
-        atoms[i].pos.x = random_range(-bx / 2.0, bx / 2.0);
-        atoms[i].pos.y = random_range(-by / 2.0, by / 2.0);
         atoms[i].t = (i % num_t) as usize;
+        (atoms[i].pos.x, atoms[i].pos.y) = settings.pgen_t.gen(atoms[i].t, num_t, bx, by);
+        // random_range(-bx / 2.0, bx / 2.0);
+        //atoms[i].pos.y = random_range(-by / 2.0, by / 2.0);
     }
     Model {
         _window,
@@ -70,13 +72,14 @@ fn restart(app: &App, _window: window::Id, n: usize, n_t: usize) -> Model {
         pnt: num_t,
         zoom: m.settings.zoom,
         psize: m.settings.psize,
+        pgen_t: m.settings.pgen_t,
     };
     let mut atoms: Vec<Atom> = vec![Atom::default(); n];
     let (bx, by) = app.window_rect().w_h();
     for i in 0..atoms.len() {
-        atoms[i].pos.x = random_range(-bx / 2.0, bx / 2.0);
-        atoms[i].pos.y = random_range(-by / 2.0, by / 2.0);
         atoms[i].t = (i % num_t) as usize;
+        (atoms[i].pos.x, atoms[i].pos.y) = settings.pgen_t.gen(atoms[i].t, num_t, bx, by);
+        //random_range(-by / 2.0, by / 2.0);
     }
     let e = Egui::from_window(&(app.window(_window).unwrap()));
     Model {
@@ -225,6 +228,7 @@ struct Settings {
     pnt: usize,
     zoom: f32,
     psize: f32,
+    pgen_t: PosInit,
 }
 #[derive(Copy, Clone, Debug)]
 struct Atom {
@@ -304,5 +308,28 @@ fn get_col(t: usize) -> Rgb<u8> {
         5 => LIGHTCORAL,
         6 => LIGHTPINK,
         _ => SEASHELL,
+    }
+}
+enum PosInit {
+    Bands,
+    Random,
+}
+impl PosInit {
+    fn gen(&self, t: usize, l: usize, w: f32, h: f32) -> (f32, f32) {
+        match self {
+            &PosInit::Bands => PosInit::bands(t, w, h, l),
+            &PosInit::Random => PosInit::random(t, w, h),
+            _ => (0.0, 0.0),
+        }
+    }
+    fn bands(t: usize, w: f32, h: f32, l: usize) -> (f32, f32) {
+        let ww = (w / (l as f32));
+        let x = random_range(t as f32 * ww, (t + 1) as f32 * ww) - w / 2.0;
+        (x, random_range(-h / 2.0, h / 2.0))
+    }
+    fn random(t: usize, w: f32, h: f32) -> (f32, f32) {
+        let ww = w / 2.0;
+        let hh = h / 2.0;
+        (random_range(-ww, ww), random_range(-hh, hh))
     }
 }
