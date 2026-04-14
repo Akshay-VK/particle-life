@@ -27,7 +27,7 @@ use winit::{
 // Raise this now that physics runs on the GPU.
 // Try 50_000 to start. On a modern GPU, 100_000+ should be smooth at O(n²).
 // Step 4 (spatial hash) will push this to millions.
-const NUM_PARTICLES: u32 = 10_000;
+const NUM_PARTICLES: u32 = 15_000;
 
 fn main() {
     env_logger::init();

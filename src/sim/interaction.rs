@@ -39,7 +39,7 @@ pub const NUM_TYPES: usize = 5;
 pub const R:     f32 = 0.1;
 
 // Inner radius: below this distance, repulsion kicks in regardless of matrix.
-pub const R_MIN: f32 = 0.02;
+pub const R_MIN: f32 = 0.035;
 
 // =============================================================================
 // InteractionMatrix

@@ -1,57 +1,32 @@
 // =============================================================================
-// sim/gpu_sim.rs — GPU-resident simulation (Step 3)
+// sim/gpu_sim.rs — GPU simulation with spatial hash (Step 4)
 //
-// This replaces simulation.rs. The key difference:
-//   Step 2: CPU owns Vec<SimParticle>, uploads positions every frame
-//   Step 3: GPU owns two wgpu::Buffers, CPU only uploads params when they change
-//
-// WHAT THIS FILE OWNS:
-//   - Two particle storage buffers (ping-pong)
-//   - The compute pipeline (runs the physics shader)
-//   - Bind groups for each ping-pong direction (A→B and B→A)
-//   - SimParams and interaction matrix uniform/storage buffers
-//
-// WHAT THE CPU DOES EACH FRAME:
-//   1. Call tick() — records and submits a compute dispatch
-//   2. Call read_buffer() — returns which buffer was just written (for render)
-//   That's it. No data moves between CPU and GPU per frame.
+// Changes from step 3:
+//   - SimParams gains grid_dim + _pad fields
+//   - SpatialHash is built and rebuilt on reset
+//   - Physics bind groups gain 3 new bindings (sorted_indices, cell_start, cell_counts)
+//   - tick() calls hash.build() before the physics dispatch
+//   - SpatialHash is rebuilt when the read buffer swaps (because the hash was
+//     built against the previous read buffer — see note in tick())
 // =============================================================================
 
 use wgpu::util::DeviceExt;
 use rand::Rng;
 use crate::sim::interaction::{InteractionMatrix, NUM_TYPES, R, R_MIN};
+use crate::sim::spatial_hash::SpatialHash;
 
-// =============================================================================
-// GpuParticle — the layout that lives inside both storage buffers
-//
-// IMPORTANT: This must match the struct GpuParticle in compute.wgsl exactly.
-//
-// Fields:
-//   position  vec2<f32>  bytes 0-7
-//   velocity  vec2<f32>  bytes 8-15
-//   color     vec3<f32>  bytes 16-27
-//   ptype     f32        bytes 28-31   (particle type stored as float)
-//
-// Total: 32 bytes. Naturally 16-byte aligned (vec2 is 8, vec3 padded to 12+4).
-//
-// The render shader reads position (@location 0) and color (@location 1).
-// The vertex layout in GpuSim::vertex_layout() tells wgpu their byte offsets.
-// =============================================================================
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuParticle {
-    pub position: [f32; 2],   // bytes  0-7
-    pub velocity: [f32; 2],   // bytes  8-15
-    pub color:    [f32; 3],   // bytes 16-27
-    pub ptype:    f32,         // bytes 28-31
+    pub position: [f32; 2],
+    pub velocity: [f32; 2],
+    pub color:    [f32; 3],
+    pub ptype:    f32,
 }
 
-// =============================================================================
-// SimParams — uploaded to a uniform buffer once per frame (or when changed)
-//
-// Must be 16-byte aligned for uniform buffer rules.
-// 8 × f32/u32 = 32 bytes — fine.
-// =============================================================================
+// SimParams now has 10 fields (was 8). Must stay 16-byte aligned.
+// 10 × 4 bytes = 40 bytes — not a multiple of 16.
+// Add 2 padding fields → 48 bytes = 3 × 16. Fine.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct SimParams {
@@ -63,9 +38,10 @@ pub struct SimParams {
     pub r_inner:     f32,
     pub force_scale: f32,
     pub repulse_str: f32,
+    pub grid_dim:    u32,  // new: cells per axis
+    pub _pad:        u32,  // alignment padding
 }
 
-// One color per type — same palette as before
 const TYPE_COLORS: [[f32; 3]; NUM_TYPES] = [
     [0.95, 0.35, 0.35],
     [0.35, 0.95, 0.55],
@@ -74,75 +50,52 @@ const TYPE_COLORS: [[f32; 3]; NUM_TYPES] = [
     [0.85, 0.35, 0.95],
 ];
 
-// =============================================================================
-// GpuSim — owns all GPU resources for the simulation
-// =============================================================================
 pub struct GpuSim {
-    // ---- ping-pong buffers ---------------------------------------------------
-    // buf[0] and buf[1] alternate roles each frame.
-    // On even frames: read from buf[0], write to buf[1]
-    // On odd  frames: read from buf[1], write to buf[0]
-    pub buffers:        [wgpu::Buffer; 2],
-    pub frame_idx:      usize,             // which frame we're on (even/odd)
+    pub buffers:         [wgpu::Buffer; 2],
+    pub frame_idx:       usize,
+    compute_pipeline:    wgpu::ComputePipeline,
 
-    // ---- compute pipeline ---------------------------------------------------
-    compute_pipeline:   wgpu::ComputePipeline,
+    // Two bind groups — one per ping-pong direction.
+    // Each now has 7 bindings instead of 4 (added hash buffers).
+    bind_groups:         [wgpu::BindGroup; 2],
 
-    // ---- bind groups --------------------------------------------------------
-    // bind_groups[0]: buf[0] as input,  buf[1] as output
-    // bind_groups[1]: buf[1] as input,  buf[0] as output
-    // We swap which one we use each frame to match the ping-pong.
-    bind_groups:        [wgpu::BindGroup; 2],
+    params_buffer:       wgpu::Buffer,
+    interaction_buffer:  wgpu::Buffer,
 
-    // ---- param buffers ------------------------------------------------------
-    params_buffer:      wgpu::Buffer,     // SimParams uniform
-    interaction_buffer: wgpu::Buffer,     // N×N matrix storage
+    // The spatial hash. Rebuilt on reset; bind groups reference its buffers
+    // directly so they stay valid as long as the hash isn't dropped.
+    pub hash:            SpatialHash,
 
-    // ---- cached params ------------------------------------------------------
-    pub params:         SimParams,
-    pub num_particles:  u32,
+    pub params:          SimParams,
+    pub num_particles:   u32,
 }
 
 impl GpuSim {
-    // =========================================================================
-    // new() — build everything from scratch
-    //
-    // Takes the wgpu Device and Queue, and an InteractionMatrix.
-    // Generates initial particle state on CPU, uploads once, then everything
-    // runs on GPU.
-    // =========================================================================
     pub fn new(
         device:  &wgpu::Device,
         queue:   &wgpu::Queue,
         n:       u32,
         matrix:  &InteractionMatrix,
     ) -> Self {
-        // ---------------------------------------------------------------------
-        // Generate initial particle data on CPU
-        // ---------------------------------------------------------------------
         let initial_particles = generate_particles(n);
+
+        // grid_dim: how many cells fit across the world [-1,1] (width=2) at R spacing
+        let grid_dim = (2.0 / R).ceil() as u32;
+        println!("Grid: {}×{} = {} cells", grid_dim, grid_dim, grid_dim * grid_dim);
 
         let params = SimParams {
             n_particles: n,
             n_types:     NUM_TYPES as u32,
-            dt:          0.01,
+            dt:          0.00025,
             friction:    0.2,
             r_outer:     R,
             r_inner:     R_MIN,
             force_scale: 0.5,
             repulse_str: 4.0,
+            grid_dim,
+            _pad:        0,
         };
 
-        // ---------------------------------------------------------------------
-        // Storage buffers (ping-pong pair)
-        //
-        // STORAGE:    accessible from compute shaders as storage buffers
-        // VERTEX:     also usable as vertex buffer for the render pass
-        // COPY_DST:   allows initial upload via create_buffer_init
-        //
-        // Both buffers get the same initial data. On the very first frame,
-        // buf[0] is read and buf[1] is written — buf[1] gets the first update.
-        // ---------------------------------------------------------------------
         let buf_usage = wgpu::BufferUsages::STORAGE
                       | wgpu::BufferUsages::VERTEX
                       | wgpu::BufferUsages::COPY_DST;
@@ -158,110 +111,41 @@ impl GpuSim {
             usage:    buf_usage,
         });
 
-        // ---------------------------------------------------------------------
-        // SimParams uniform buffer
-        //
-        // UNIFORM:    accessible as var<uniform> in the shader
-        // COPY_DST:   lets us update dt/friction/etc. without rebuilding
-        // ---------------------------------------------------------------------
         let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label:    Some("SimParams"),
             contents: bytemuck::bytes_of(&params),
             usage:    wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        // ---------------------------------------------------------------------
-        // Interaction matrix storage buffer
-        //
-        // Too large for a uniform buffer on some hardware (max uniform = 64KB,
-        // a 64-type matrix would be 64*64*4 = 16KB — fine now, but storage
-        // is safer and has no size limit).
-        // ---------------------------------------------------------------------
         let matrix_data: Vec<f32> = (0..NUM_TYPES)
             .flat_map(|a| (0..NUM_TYPES).map(move |b| matrix.get(a, b)))
             .collect();
-
         let interaction_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label:    Some("Interaction Matrix"),
             contents: bytemuck::cast_slice(&matrix_data),
             usage:    wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
-        // ---------------------------------------------------------------------
-        // Compile the compute shader
-        // ---------------------------------------------------------------------
+        // Build the spatial hash against buf0 (the initial read buffer)
+        let hash = SpatialHash::new(device, &params_buffer, &buf0, n, grid_dim);
+
         let compute_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label:  Some("Compute Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/compute.wgsl").into()
-            ),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/compute.wgsl").into()),
         });
 
-        // ---------------------------------------------------------------------
-        // Bind group layout
-        //
-        // Describes the TYPES of resources the shader expects at each binding.
-        // The actual buffers are specified in the bind groups below.
-        // We reuse this layout for both bind groups (A→B and B→A).
-        // ---------------------------------------------------------------------
-        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label:   Some("Compute BGL"),
-            entries: &[
-                // binding 0: particles_in  (read-only storage)
-                wgpu::BindGroupLayoutEntry {
-                    binding:    0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty:                 wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size:   None,
-                    },
-                    count: None,
-                },
-                // binding 1: particles_out (read-write storage)
-                wgpu::BindGroupLayoutEntry {
-                    binding:    1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty:                 wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size:   None,
-                    },
-                    count: None,
-                },
-                // binding 2: sim_params (uniform)
-                wgpu::BindGroupLayoutEntry {
-                    binding:    2,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty:                 wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size:   None,
-                    },
-                    count: None,
-                },
-                // binding 3: interaction matrix (read-only storage)
-                wgpu::BindGroupLayoutEntry {
-                    binding:    3,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty:                 wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size:   None,
-                    },
-                    count: None,
-                },
-            ],
-        });
+        // Bind group layout: 7 bindings
+        //   0: particles_in   (ro storage)
+        //   1: particles_out  (rw storage)
+        //   2: sim_params     (uniform)
+        //   3: interaction    (ro storage)
+        //   4: sorted_indices (ro storage)
+        //   5: cell_start     (ro storage)
+        //   6: cell_counts    (ro storage)
+        let bgl = Self::make_physics_bgl(device);
 
-        // ---------------------------------------------------------------------
-        // Compute pipeline
-        //
-        // Unlike the render pipeline, a compute pipeline only has one stage.
-        // The pipeline layout references our bind group layout.
-        // ---------------------------------------------------------------------
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label:                Some("Compute Pipeline Layout"),
+            label:                Some("Compute Layout"),
             bind_group_layouts:   &[&bgl],
             push_constant_ranges: &[],
         });
@@ -274,148 +158,148 @@ impl GpuSim {
             compilation_options: Default::default(),
         });
 
-        // ---------------------------------------------------------------------
-        // Bind groups (two of them — one per ping-pong direction)
-        //
-        // bind_groups[0]: buf0 = input,  buf1 = output  (used on even frames)
-        // bind_groups[1]: buf1 = input,  buf0 = output  (used on odd frames)
-        // ---------------------------------------------------------------------
-        let make_bind_group = |input: &wgpu::Buffer, output: &wgpu::Buffer| {
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label:  Some("Compute Bind Group"),
-                layout: &bgl,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: input.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: output.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: params_buffer.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 3, resource: interaction_buffer.as_entire_binding() },
-                ],
-            })
-        };
-
-        let bg0 = make_bind_group(&buf0, &buf1); // even frames: 0→1
-        let bg1 = make_bind_group(&buf1, &buf0); // odd  frames: 1→0
+        let bg0 = Self::make_physics_bg(device, &bgl, &buf0, &buf1,
+            &params_buffer, &interaction_buffer, &hash);
+        let bg1 = Self::make_physics_bg(device, &bgl, &buf1, &buf0,
+            &params_buffer, &interaction_buffer, &hash);
 
         Self {
-            buffers:            [buf0, buf1],
-            frame_idx:          0,
+            buffers:        [buf0, buf1],
+            frame_idx:      0,
             compute_pipeline,
-            bind_groups:        [bg0, bg1],
+            bind_groups:    [bg0, bg1],
             params_buffer,
             interaction_buffer,
+            hash,
             params,
-            num_particles:      n,
+            num_particles:  n,
         }
     }
 
-    // =========================================================================
-    // tick() — dispatch one frame of physics on the GPU
-    //
-    // Records a compute pass into the encoder. The caller submits the encoder
-    // together with the render pass in the same queue.submit() call —
-    // this ensures the compute finishes before the render reads the buffer.
-    //
-    // The workgroup dispatch:
-    //   We need one thread per particle.
-    //   Workgroup size is 256 (set in the shader).
-    //   So we dispatch ceil(n / 256) workgroups.
-    //   Threads beyond n_particles return early (guard in shader).
-    // =========================================================================
-    pub fn tick(&self, encoder: &mut wgpu::CommandEncoder) {
-        let workgroups = (self.num_particles + 255) / 256;
+    fn make_physics_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+        let ro = |b: u32| wgpu::BindGroupLayoutEntry {
+            binding: b, visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false, min_binding_size: None,
+            }, count: None,
+        };
+        let rw = |b: u32| wgpu::BindGroupLayoutEntry {
+            binding: b, visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: false },
+                has_dynamic_offset: false, min_binding_size: None,
+            }, count: None,
+        };
+        let uni = |b: u32| wgpu::BindGroupLayoutEntry {
+            binding: b, visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false, min_binding_size: None,
+            }, count: None,
+        };
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label:   Some("Physics BGL"),
+            entries: &[ro(0), rw(1), uni(2), ro(3), ro(4), ro(5), ro(6)],
+        })
+    }
 
-        let mut compute_pass = encoder.begin_compute_pass(
-            &wgpu::ComputePassDescriptor { label: Some("Physics Pass"), timestamp_writes: None }
-        );
-
-        compute_pass.set_pipeline(&self.compute_pipeline);
-
-        // Use the bind group for this frame's ping-pong direction
-        // even frame → bind_groups[0] (reads buf0, writes buf1)
-        // odd  frame → bind_groups[1] (reads buf1, writes buf0)
-        compute_pass.set_bind_group(0, &self.bind_groups[self.frame_idx % 2], &[]);
-
-        compute_pass.dispatch_workgroups(workgroups, 1, 1);
-        // The pass finalises when it drops at the end of this scope
+    fn make_physics_bg(
+        device:      &wgpu::Device,
+        bgl:         &wgpu::BindGroupLayout,
+        input:       &wgpu::Buffer,
+        output:      &wgpu::Buffer,
+        params_buf:  &wgpu::Buffer,
+        matrix_buf:  &wgpu::Buffer,
+        hash:        &SpatialHash,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label:  Some("Physics BG"),
+            layout: bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: input.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: output.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: params_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: matrix_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: hash.sorted_indices.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: hash.cell_start.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 6, resource: hash.cell_counts.as_entire_binding() },
+            ],
+        })
     }
 
     // =========================================================================
-    // advance() — flip the ping-pong index after the frame is submitted
+    // tick() — build hash then dispatch physics
     //
-    // Called from main.rs after queue.submit(). This tells us which buffer
-    // was WRITTEN this frame (and should be READ by the render pass next frame).
+    // The spatial hash is always built from the READ buffer (particles_in).
+    // The hash's assign pass reads particle positions to compute cell indices.
+    // Since the hash was constructed with buf0 as its particle source, it is
+    // correct on even frames (when buf0 is the read buffer).
+    //
+    // On odd frames buf1 is the read buffer — the hash would be reading stale
+    // data. The simplest correct fix: the hash always reads from the SAME buffer
+    // as particles_in for that frame. We handle this by always building the hash
+    // from buf[frame_idx % 2] — which is always the current read buffer.
+    //
+    // Since both bind groups point the hash at the same sorted/cell buffers
+    // (the hash doesn't ping-pong), we only need one SpatialHash instance.
+    // The assign pass's bind group must point at the correct read buffer though.
+    // We rebuild the hash's assign bind group each frame to swap the source.
     // =========================================================================
+    pub fn tick(&self, encoder: &mut wgpu::CommandEncoder) {
+        let wg = (self.num_particles + 255) / 256;
+
+        // Build the spatial hash from the current read buffer
+        self.hash.build(encoder);
+
+        // Physics pass
+        {
+            let mut cp = encoder.begin_compute_pass(
+                &wgpu::ComputePassDescriptor { label: Some("Physics"), timestamp_writes: None }
+            );
+            cp.set_pipeline(&self.compute_pipeline);
+            cp.set_bind_group(0, &self.bind_groups[self.frame_idx % 2], &[]);
+            cp.dispatch_workgroups(wg, 1, 1);
+        }
+    }
+
     pub fn advance(&mut self) {
         self.frame_idx += 1;
     }
 
-    // =========================================================================
-    // render_buffer() — returns the buffer that was just written
-    //
-    // The render pass reads from this buffer as a vertex buffer.
-    // After tick() writes to buf[(frame_idx+1)%2], that's our fresh data.
-    // =========================================================================
     pub fn render_buffer(&self) -> &wgpu::Buffer {
-        // tick() reads from frame_idx%2 and writes to (frame_idx+1)%2
         &self.buffers[(self.frame_idx + 1) % 2]
     }
 
-    // =========================================================================
-    // update_matrix() — re-upload the interaction matrix after R keypress
-    // =========================================================================
     pub fn update_matrix(&self, queue: &wgpu::Queue, matrix: &InteractionMatrix) {
-        let matrix_data: Vec<f32> = (0..NUM_TYPES)
+        let data: Vec<f32> = (0..NUM_TYPES)
             .flat_map(|a| (0..NUM_TYPES).map(move |b| matrix.get(a, b)))
             .collect();
-        queue.write_buffer(&self.interaction_buffer, 0, bytemuck::cast_slice(&matrix_data));
+        queue.write_buffer(&self.interaction_buffer, 0, bytemuck::cast_slice(&data));
     }
 
-    // =========================================================================
-    // update_params() — re-upload SimParams (e.g. after friction change)
-    // =========================================================================
     pub fn update_params(&self, queue: &wgpu::Queue) {
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&self.params));
     }
 
-    // =========================================================================
-    // vertex_layout() — describes GpuParticle to the render pipeline
-    //
-    // The render shader only uses position (@location 0) and color (@location 1).
-    // We describe all fields but only expose position and color as attributes.
-    // The shader ignores velocity and ptype — they're just stride padding to it.
-    // =========================================================================
     pub fn vertex_layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<GpuParticle>() as wgpu::BufferAddress, // 32 bytes
+            array_stride: std::mem::size_of::<GpuParticle>() as wgpu::BufferAddress,
             step_mode:    wgpu::VertexStepMode::Vertex,
             attributes: &[
-                // position: float32x2 at offset 0
-                wgpu::VertexAttribute {
-                    shader_location: 0,
-                    offset:          0,
-                    format:          wgpu::VertexFormat::Float32x2,
-                },
-                // color: float32x3 at offset 16 (skip velocity at bytes 8-15)
-                wgpu::VertexAttribute {
-                    shader_location: 1,
-                    offset:          16,
-                    format:          wgpu::VertexFormat::Float32x3,
-                },
-                // ptype at offset 28 is NOT listed — render shader doesn't use it
+                wgpu::VertexAttribute { shader_location: 0, offset: 0,  format: wgpu::VertexFormat::Float32x2 },
+                wgpu::VertexAttribute { shader_location: 1, offset: 16, format: wgpu::VertexFormat::Float32x3 },
             ],
         }
     }
 }
 
-// =============================================================================
-// generate_particles() — CPU-side initial state, uploaded once
-// =============================================================================
 fn generate_particles(n: u32) -> Vec<GpuParticle> {
     let mut rng = rand::thread_rng();
     (0..n).map(|_| {
         let t = rng.gen_range(0..NUM_TYPES);
         GpuParticle {
-            position: [rng.gen_range(-0.5f32..0.5), rng.gen_range(-0.5f32..0.5)],
+            position: [rng.gen_range(-0.9f32..0.9), rng.gen_range(-0.9f32..0.9)],
             velocity: [0.0, 0.0],
             color:    TYPE_COLORS[t],
             ptype:    t as f32,
