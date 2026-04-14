@@ -39,7 +39,7 @@ pub const NUM_TYPES: usize = 5;
 pub const R:     f32 = 0.1;
 
 // Inner radius: below this distance, repulsion kicks in regardless of matrix.
-pub const R_MIN: f32 = 0.025;
+pub const R_MIN: f32 = 0.02;
 
 // =============================================================================
 // InteractionMatrix
@@ -117,8 +117,8 @@ impl InteractionMatrix {
         if dist < R_MIN {
             // Short-range repulsion: ramps from -1 at dist=0 to 0 at dist=R_MIN
             // We multiply by a large constant so it actually overcomes attraction
-            let repulse_strength = 3.0;
-            return repulse_strength * (dist / R_MIN - 1.0);
+            let repulse_strength = 2.0;
+            return -1.0 * repulse_strength * (dist / R_MIN - 1.0);
             //                                        ^^^
             // At dist=0:     0/R_MIN - 1 = -1  → force = -repulse_strength (strong push)
             // At dist=R_MIN: 1       - 1 =  0  → force = 0 (transitions to zone 2)

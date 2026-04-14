@@ -1,12 +1,16 @@
 // =============================================================================
-// main.rs  (Step 2)
+// main.rs  (Step 3)
 //
-// Changes from Step 1:
-//   - `mod sim` added
-//   - Simulation::new() called before renderer (renderer needs initial GPU data)
-//   - sim.tick() called every frame before renderer.render()
-//   - renderer.update() uploads fresh positions to GPU after each tick
-//   - Keyboard: R = randomise matrix, Space = reset positions
+// Much simpler than Step 2 — the CPU no longer ticks physics or uploads data.
+// The main loop just calls renderer.render(sim) which dispatches both the
+// compute and render passes in one encoder submission.
+//
+// Changes from Step 2:
+//   - No more sim.tick() / sim.gpu_particles() / renderer.update() calls
+//   - GpuSim::new() takes the device + queue (it creates its own GPU resources)
+//   - Renderer::new() no longer needs initial particle data
+//   - R key: randomise matrix + upload via sim.update_matrix()
+//   - Space: rebuild GpuSim entirely (re-scatters particles, new matrix)
 // =============================================================================
 
 mod render;
@@ -20,9 +24,10 @@ use winit::{
     window::WindowBuilder,
 };
 
-// How many particles to simulate. At 5000, CPU O(n²) runs comfortably at 60fps.
-// Push to ~8000 and you'll start feeling it — that's the motivation for step 3.
-const NUM_PARTICLES: usize = 1_000;
+// Raise this now that physics runs on the GPU.
+// Try 50_000 to start. On a modern GPU, 100_000+ should be smooth at O(n²).
+// Step 4 (spatial hash) will push this to millions.
+const NUM_PARTICLES: u32 = 10_000;
 
 fn main() {
     env_logger::init();
@@ -35,33 +40,38 @@ fn main() {
             .with_title("Particle Life  |  R = new rules  |  Space = reset")
             .with_inner_size(winit::dpi::LogicalSize::new(1280u32, 720u32))
             .build(&event_loop)
-            .expect("Window creation failed")
+            .expect("Window failed")
     );
 
     // -------------------------------------------------------------------------
-    // Create the simulation FIRST.
-    //
-    // The renderer needs the initial GPU particle data to size its buffer.
-    // So we tick the simulation once (just to generate positions), convert
-    // to GpuParticles, then hand those to the renderer constructor.
+    // Init renderer first — we need the device to build GpuSim.
     // -------------------------------------------------------------------------
-    let mut sim = sim::Simulation::new(NUM_PARTICLES);
-    let initial_gpu = sim.gpu_particles();
-
     let mut renderer = pollster::block_on(
-        render::Renderer::new(window.clone(), &initial_gpu)
+        render::Renderer::new(window.clone(), NUM_PARTICLES)
     );
 
-    // fps tracking — prints to terminal every second
-    let mut frame_count  = 0u32;
-    let mut last_fps_time = std::time::Instant::now();
+    // -------------------------------------------------------------------------
+    // Build the GPU simulation using the renderer's device + queue.
+    // GpuSim allocates its buffers and pipelines here.
+    // -------------------------------------------------------------------------
+    let matrix = sim::InteractionMatrix::random();
+    matrix.print();
+
+    let mut gpu_sim = sim::GpuSim::new(
+        &renderer.device,
+        &renderer.queue,
+        NUM_PARTICLES,
+        &matrix,
+    );
+
+    // fps counter
+    let mut frames    = 0u32;
+    let mut fps_timer = std::time::Instant::now();
 
     event_loop.run(move |event, elwt| {
         match event {
 
-            Event::AboutToWait => {
-                window.request_redraw();
-            }
+            Event::AboutToWait => window.request_redraw(),
 
             Event::WindowEvent { event, .. } => match event {
 
@@ -69,54 +79,55 @@ fn main() {
 
                 WindowEvent::RedrawRequested => {
                     // ---------------------------------------------------------
-                    // MAIN LOOP — runs every frame
+                    // THE ENTIRE MAIN LOOP IS NOW ONE LINE.
                     //
-                    // Order matters:
-                    //   1. tick()         — advance physics (CPU)
-                    //   2. gpu_particles() — convert to upload format
-                    //   3. update()       — write positions to GPU buffer
-                    //   4. render()       — GPU draws the updated buffer
+                    // renderer.render() internally:
+                    //   1. Acquires the swap chain texture
+                    //   2. Creates a command encoder
+                    //   3. Records compute pass (physics via gpu_sim.tick())
+                    //   4. Records render pass (draws gpu_sim.render_buffer())
+                    //   5. Submits both passes together
+                    //   6. Presents the frame
+                    //   7. Calls gpu_sim.advance() to flip ping-pong
                     // ---------------------------------------------------------
-                    sim.tick();
-                    let gpu_data = sim.gpu_particles();
-                    renderer.update(&gpu_data);
-                    renderer.render();
+                    renderer.render(&mut gpu_sim);
 
-                    // Print fps once per second
-                    frame_count += 1;
-                    let elapsed = last_fps_time.elapsed();
-                    if elapsed.as_secs_f32() >= 1.0 {
-                        println!("FPS: {}", frame_count);
-                        frame_count  = 0;
-                        last_fps_time = std::time::Instant::now();
+                    frames += 1;
+                    if fps_timer.elapsed().as_secs_f32() >= 1.0 {
+                        println!("FPS: {}  |  Particles: {}", frames, NUM_PARTICLES);
+                        frames    = 0;
+                        fps_timer = std::time::Instant::now();
                     }
                 }
 
-                // R — randomise the interaction matrix
-                // You'll see the particles reorganise into new patterns
+                // R — new interaction rules, keep particle positions
                 WindowEvent::KeyboardInput {
                     event: KeyEvent {
                         physical_key: PhysicalKey::Code(KeyCode::KeyR),
                         state: winit::event::ElementState::Pressed, ..
                     }, ..
                 } => {
-                    println!("--- Randomising interaction matrix ---");
-                    sim.randomise_matrix();
+                    let new_matrix = sim::InteractionMatrix::random();
+                    new_matrix.print();
+                    gpu_sim.update_matrix(&renderer.queue, &new_matrix);
                 }
 
-                // Space — scatter particles back to random positions
-                // Good for seeing the system settle from scratch with current rules
+                // Space — full reset: new positions + new rules
                 WindowEvent::KeyboardInput {
                     event: KeyEvent {
                         physical_key: PhysicalKey::Code(KeyCode::Space),
                         state: winit::event::ElementState::Pressed, ..
                     }, ..
                 } => {
-                    println!("--- Resetting particle positions ---");
-                    sim = sim::Simulation::new(NUM_PARTICLES);
-                    // Note: matrix is also re-randomised here because Simulation::new
-                    // always generates a fresh one. Later we can add reset_positions()
-                    // that keeps the current matrix but re-scatters particles.
+                    println!("--- Full reset ---");
+                    let new_matrix = sim::InteractionMatrix::random();
+                    new_matrix.print();
+                    gpu_sim = sim::GpuSim::new(
+                        &renderer.device,
+                        &renderer.queue,
+                        NUM_PARTICLES,
+                        &new_matrix,
+                    );
                 }
 
                 WindowEvent::CloseRequested => elwt.exit(),
