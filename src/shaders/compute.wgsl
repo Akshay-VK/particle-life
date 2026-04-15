@@ -84,11 +84,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // -------------------------------------------------------------------------
     for (var dy: i32 = -1; dy <= 1; dy++) {
         for (var dx: i32 = -1; dx <= 1; dx++) {
-            let nx = my_cell.x + dx;
-            let ny = my_cell.y + dy;
+            var nx = my_cell.x + dx;
+            var ny = my_cell.y + dy;
 
-            // Skip cells outside the grid
-            if nx < 0 || ny < 0 || nx >= gd || ny >= gd { continue; }
+            // fixed — wraps around
+            nx = ((nx % gd) + gd) % gd;
+            ny = ((ny % gd) + gd) % gd;
+            // let cell = u32(wy * gd + wx);
 
             let cell    = u32(ny * gd + nx);
             let start   = cell_start[cell];
