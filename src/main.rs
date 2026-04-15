@@ -1,16 +1,20 @@
 // =============================================================================
-// main.rs  (Step 3)
+// main.rs
 //
-// Much simpler than Step 2 — the CPU no longer ticks physics or uploads data.
-// The main loop just calls renderer.render(sim) which dispatches both the
-// compute and render passes in one encoder submission.
-//
-// Changes from Step 2:
-//   - No more sim.tick() / sim.gpu_particles() / renderer.update() calls
-//   - GpuSim::new() takes the device + queue (it creates its own GPU resources)
-//   - Renderer::new() no longer needs initial particle data
-//   - R key: randomise matrix + upload via sim.update_matrix()
-//   - Space: rebuild GpuSim entirely (re-scatters particles, new matrix)
+// Controls:
+//   Scroll wheel      — zoom toward cursor
+//   Right mouse drag  — pan
+//   C                 — reset camera
+//   R                 — randomise interaction (force) matrix
+//   T                 — randomise state transfer matrix
+//   [ ]               — state decay down / up
+//   - =               — state transfer scale down / up
+//   1                 — reset: Random placement
+//   2                 — reset: Clustered (8 clusters)
+//   3                 — reset: Rings (one ring per type)
+//   4                 — reset: Grid
+//   Space             — reset: Random (same as 1)
+//   Escape            — quit
 // =============================================================================
 
 mod render;
@@ -18,15 +22,15 @@ mod sim;
 
 use std::sync::Arc;
 use winit::{
-    event::{Event, WindowEvent, KeyEvent},
+    event::{
+        Event, WindowEvent, KeyEvent,
+        MouseScrollDelta, ElementState, MouseButton,
+    },
     event_loop::{ControlFlow, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
     window::WindowBuilder,
 };
 
-// Raise this now that physics runs on the GPU.
-// Try 50_000 to start. On a modern GPU, 100_000+ should be smooth at O(n²).
-// Step 4 (spatial hash) will push this to millions.
 const NUM_PARTICLES: u32 = 15_000;
 
 fn main() {
@@ -37,110 +41,202 @@ fn main() {
 
     let window = Arc::new(
         WindowBuilder::new()
-            .with_title("Particle Life  |  R = new rules  |  Space = reset")
+            .with_title(
+                "Particle Life  |  Scroll=zoom  RMB=pan  C=camera  \
+                 R=rules  T=state  []=decay  -/==transfer  1-4=init  Space=reset"
+            )
             .with_inner_size(winit::dpi::LogicalSize::new(1280u32, 720u32))
             .build(&event_loop)
             .expect("Window failed")
     );
 
-    // -------------------------------------------------------------------------
-    // Init renderer first — we need the device to build GpuSim.
-    // -------------------------------------------------------------------------
     let mut renderer = pollster::block_on(
         render::Renderer::new(window.clone(), NUM_PARTICLES)
     );
 
-    // -------------------------------------------------------------------------
-    // Build the GPU simulation using the renderer's device + queue.
-    // GpuSim allocates its buffers and pipelines here.
-    // -------------------------------------------------------------------------
     let matrix = sim::InteractionMatrix::random();
     matrix.print();
-
     let mut gpu_sim = sim::GpuSim::new(
         &renderer.device,
         &renderer.queue,
         NUM_PARTICLES,
         &matrix,
+        sim::InitConfig::Random,
     );
 
-    // fps counter
+    // ---- input state --------------------------------------------------------
+    let mut cursor_pos  = (0.0f32, 0.0f32); // last known cursor in pixels
+    let mut last_drag   = (0.0f32, 0.0f32); // cursor position when RMB went down
+    let mut rmb_down    = false;
+
+    // ---- fps counter --------------------------------------------------------
     let mut frames    = 0u32;
     let mut fps_timer = std::time::Instant::now();
 
     event_loop.run(move |event, elwt| {
         match event {
-
             Event::AboutToWait => window.request_redraw(),
 
             Event::WindowEvent { event, .. } => match event {
 
                 WindowEvent::Resized(s) => renderer.resize(s),
 
+                // ------------------------------------------------------------------
+                // Main render loop
+                // ------------------------------------------------------------------
                 WindowEvent::RedrawRequested => {
-                    // ---------------------------------------------------------
-                    // THE ENTIRE MAIN LOOP IS NOW ONE LINE.
-                    //
-                    // renderer.render() internally:
-                    //   1. Acquires the swap chain texture
-                    //   2. Creates a command encoder
-                    //   3. Records compute pass (physics via gpu_sim.tick())
-                    //   4. Records render pass (draws gpu_sim.render_buffer())
-                    //   5. Submits both passes together
-                    //   6. Presents the frame
-                    //   7. Calls gpu_sim.advance() to flip ping-pong
-                    // ---------------------------------------------------------
                     renderer.render(&mut gpu_sim);
 
                     frames += 1;
                     if fps_timer.elapsed().as_secs_f32() >= 1.0 {
-                        println!("FPS: {}  |  Particles: {}", frames, NUM_PARTICLES);
+                        println!(
+                            "FPS: {:3}  |  decay: {:.4}  transfer_scale: {:.2}",
+                            frames,
+                            gpu_sim.params.state_decay,
+                            gpu_sim.params.state_transfer_scale,
+                        );
                         frames    = 0;
                         fps_timer = std::time::Instant::now();
                     }
                 }
 
-                // R — new interaction rules, keep particle positions
-                WindowEvent::KeyboardInput {
-                    event: KeyEvent {
-                        physical_key: PhysicalKey::Code(KeyCode::KeyR),
-                        state: winit::event::ElementState::Pressed, ..
-                    }, ..
-                } => {
-                    let new_matrix = sim::InteractionMatrix::random();
-                    new_matrix.print();
-                    gpu_sim.update_matrix(&renderer.queue, &new_matrix);
+                // ------------------------------------------------------------------
+                // Scroll wheel — zoom toward cursor position
+                // ------------------------------------------------------------------
+                WindowEvent::MouseWheel { delta, .. } => {
+                    let lines = match delta {
+                        MouseScrollDelta::LineDelta(_, y)  => y,
+                        MouseScrollDelta::PixelDelta(p)    => p.y as f32 * 0.05,
+                    };
+                    renderer.zoom_at(lines, cursor_pos.0, cursor_pos.1);
                 }
 
-                // Space — full reset: new positions + new rules
+                // ------------------------------------------------------------------
+                // Cursor tracking — used for zoom pivot and pan delta
+                // ------------------------------------------------------------------
+                WindowEvent::CursorMoved { position, .. } => {
+                    let nx = position.x as f32;
+                    let ny = position.y as f32;
+                    if rmb_down {
+                        let dx = nx - last_drag.0;
+                        let dy = ny - last_drag.1;
+                        renderer.pan(dx, dy);
+                    }
+                    last_drag  = (nx, ny);
+                    cursor_pos = (nx, ny);
+                }
+
+                // ------------------------------------------------------------------
+                // Right mouse button — pan
+                // ------------------------------------------------------------------
+                WindowEvent::MouseInput { state, button: MouseButton::Right, .. } => {
+                    rmb_down = state == ElementState::Pressed;
+                }
+
+                // ------------------------------------------------------------------
+                // Keyboard
+                // ------------------------------------------------------------------
                 WindowEvent::KeyboardInput {
                     event: KeyEvent {
-                        physical_key: PhysicalKey::Code(KeyCode::Space),
-                        state: winit::event::ElementState::Pressed, ..
+                        physical_key: PhysicalKey::Code(code),
+                        state: ElementState::Pressed, ..
                     }, ..
-                } => {
-                    println!("--- Full reset ---");
-                    let new_matrix = sim::InteractionMatrix::random();
-                    new_matrix.print();
-                    gpu_sim = sim::GpuSim::new(
-                        &renderer.device,
-                        &renderer.queue,
-                        NUM_PARTICLES,
-                        &new_matrix,
-                    );
-                }
+                } => match code {
+
+                    // R — new force rules, keep positions
+                    KeyCode::KeyR => {
+                        let m = sim::InteractionMatrix::random();
+                        m.print();
+                        gpu_sim.update_matrix(&renderer.queue, &m);
+                    }
+
+                    // T — new state transfer matrix
+                    KeyCode::KeyT => {
+                        gpu_sim.randomise_state_transfer(&renderer.queue);
+                    }
+
+                    // C — reset camera to default
+                    KeyCode::KeyC => {
+                        renderer.reset_camera();
+                        println!("Camera reset");
+                    }
+
+                    // [ — state decay down
+                    KeyCode::BracketLeft => {
+                        gpu_sim.params.state_decay =
+                            (gpu_sim.params.state_decay - 0.005).max(0.0);
+                        gpu_sim.update_params(&renderer.queue);
+                        println!("State decay: {:.4}", gpu_sim.params.state_decay);
+                    }
+
+                    // ] — state decay up
+                    KeyCode::BracketRight => {
+                        gpu_sim.params.state_decay =
+                            (gpu_sim.params.state_decay + 0.005).min(0.5);
+                        gpu_sim.update_params(&renderer.queue);
+                        println!("State decay: {:.4}", gpu_sim.params.state_decay);
+                    }
+
+                    // - — state transfer scale down
+                    KeyCode::Minus => {
+                        gpu_sim.params.state_transfer_scale =
+                            (gpu_sim.params.state_transfer_scale - 0.1).max(0.0);
+                        gpu_sim.update_params(&renderer.queue);
+                        println!("Transfer scale: {:.2}", gpu_sim.params.state_transfer_scale);
+                    }
+
+                    // = — state transfer scale up
+                    KeyCode::Equal => {
+                        gpu_sim.params.state_transfer_scale =
+                            (gpu_sim.params.state_transfer_scale + 0.1).min(5.0);
+                        gpu_sim.update_params(&renderer.queue);
+                        println!("Transfer scale: {:.2}", gpu_sim.params.state_transfer_scale);
+                    }
+
+                    // 1-4 — init configs
+                    KeyCode::Digit1 | KeyCode::Space => do_reset(
+                        &mut gpu_sim, &renderer, NUM_PARTICLES,
+                        sim::InitConfig::Random,
+                    ),
+                    KeyCode::Digit2 => do_reset(
+                        &mut gpu_sim, &renderer, NUM_PARTICLES,
+                        sim::InitConfig::Clustered { n_clusters: 8 },
+                    ),
+                    KeyCode::Digit3 => do_reset(
+                        &mut gpu_sim, &renderer, NUM_PARTICLES,
+                        sim::InitConfig::Rings,
+                    ),
+                    KeyCode::Digit4 => do_reset(
+                        &mut gpu_sim, &renderer, NUM_PARTICLES,
+                        sim::InitConfig::Grid,
+                    ),
+
+                    KeyCode::Escape => elwt.exit(),
+                    _ => {}
+                },
 
                 WindowEvent::CloseRequested => elwt.exit(),
-                WindowEvent::KeyboardInput {
-                    event: KeyEvent {
-                        physical_key: PhysicalKey::Code(KeyCode::Escape), ..
-                    }, ..
-                } => elwt.exit(),
-
                 _ => {}
             },
-
             _ => {}
         }
     }).expect("Event loop error");
+}
+
+fn do_reset(
+    gpu_sim:  &mut sim::GpuSim,
+    renderer: &render::Renderer,
+    n:        u32,
+    config:   sim::InitConfig,
+) {
+    let m = sim::InteractionMatrix::random();
+    m.print();
+    *gpu_sim = sim::GpuSim::new(
+        &renderer.device,
+        &renderer.queue,
+        n,
+        &m,
+        config,
+    );
+    println!("Reset complete");
 }

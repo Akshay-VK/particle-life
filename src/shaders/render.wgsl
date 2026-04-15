@@ -1,25 +1,23 @@
 // =============================================================================
-// render.wgsl — aspect ratio corrected
+// render.wgsl — camera (zoom + pan) + aspect ratio + state colour tint
 //
-// The problem: particle positions are in [-1, 1] on both axes (clip space).
-// Clip space maps directly to the screen rectangle, so on a 1280x720 window
-// one clip-space unit is 720px tall but only ~562px wide. A particle that
-// moves 0.1 units right appears to move less than one moving 0.1 units up —
-// circles look like ellipses.
+// RenderParams layout (32 bytes, 16-byte aligned):
+//   aspect  f32  — width/height
+//   zoom    f32  — 1.0 = default, >1 = zoomed in
+//   pan_x   f32  — world-space pan offset X
+//   pan_y   f32  — world-space pan offset Y
 //
-// The fix: store the simulation in a square world [-1,1]x[-1,1], then in the
-// vertex shader scale X by (height/width) before passing to clip space. This
-// "squeezes" the X axis so that equal world-space distances look equal on screen.
-//
-// aspect = width / height
-// corrected_x = world_x / aspect   (shrink X to compensate for wide screen)
+// State colour tint:
+//   Each particle's state (0..1) shifts its colour toward white.
+//   This gives a live visual of which particles are "excited" without
+//   needing a separate render pass.
 // =============================================================================
 
 struct RenderParams {
-    aspect: f32,   // width / height, updated on every resize
-    _pad0:  f32,   // uniforms must be 16-byte aligned — pad to 16 bytes
-    _pad1:  f32,
-    _pad2:  f32,
+    aspect: f32,
+    zoom:   f32,
+    pan_x:  f32,
+    pan_y:  f32,
 }
 
 @group(0) @binding(0) var<uniform> rp: RenderParams;
@@ -33,15 +31,20 @@ struct VertexOutput {
 fn vs_main(
     @location(0) position: vec2<f32>,
     @location(1) color:    vec3<f32>,
+    @location(2) state:    f32,
 ) -> VertexOutput {
     var out: VertexOutput;
 
-    // Divide x by aspect ratio to map the square world onto the rectangular screen.
-    // On a 16:9 window (aspect=1.777), x is compressed by ~56% so circles stay round.
-    let corrected = vec2<f32>(position.x / rp.aspect, position.y);
+    // Apply camera: translate by pan, then scale by zoom
+    // pan is in world space (before zoom), so panning speed is consistent
+    let world  = (position + vec2<f32>(rp.pan_x, rp.pan_y)) * rp.zoom;
 
-    out.clip_position = vec4<f32>(corrected, 0.0, 1.0);
-    out.color = color;
+    // Aspect correction: squeeze X so the square world fills a rectangle screen
+    out.clip_position = vec4<f32>(world.x / rp.aspect, world.y, 0.0, 1.0);
+
+    // Tint colour toward white based on state (0=original, 1=white)
+    out.color = mix(color, vec3<f32>(1.0, 1.0, 1.0), state * 0.6);
+
     return out;
 }
 
