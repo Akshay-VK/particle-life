@@ -132,7 +132,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 if dist <= 0.0 || dist >= sim_params.r_outer { continue; }
 
                 // Force contribution
-                let f_mag = force_curve(type_a, type_b, dist);
+                // let f_mag = force_curve(type_a, type_b, dist);
+                let state_diff  = abs(p.state - q.state);
+                let activated   = step(0.3, p.state); // 0 if state < 0.3, 1 if above
+                let f_mag = force_curve(type_a, type_b, dist) * activated;
                 force += (diff / dist) * f_mag;
 
                 // State transfer contribution
