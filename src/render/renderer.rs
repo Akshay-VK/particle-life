@@ -263,7 +263,7 @@ impl Renderer {
             .write_buffer(&self.render_buf, 0, bytemuck::bytes_of(&self.render_params));
     }
 
-    pub fn render(&mut self, sim: &mut crate::sim::GpuSim) {
+    pub fn render(&mut self, sim: &mut crate::sim::GpuSim, paused: bool, speed: u32) {
         let output = match self.surface.get_current_texture() {
             Ok(t) => t,
             Err(wgpu::SurfaceError::Outdated) => return,
@@ -279,7 +279,14 @@ impl Renderer {
                 label: Some("Frame Encoder"),
             });
 
-        sim.tick(&mut encoder);
+        if !paused {
+            for i in 0..speed {
+                sim.tick(&mut encoder);
+                if i < speed - 1 {
+                    sim.advance();
+                }
+            }
+        }
 
         let particle_buffer = sim.render_buffer();
         {

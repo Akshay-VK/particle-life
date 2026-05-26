@@ -69,7 +69,7 @@ pub enum InitConfig {
     Grid,
 }
 
-const TYPE_COLORS: [[f32; 3]; NUM_TYPES] = [
+pub const TYPE_COLORS: [[f32; 3]; NUM_TYPES] = [
     [0.95, 0.35, 0.35],
     [0.35, 0.95, 0.55],
     [0.35, 0.55, 0.95],
@@ -384,6 +384,16 @@ impl GpuSim {
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&self.params));
     }
 
+    /// Upload a raw flat state transfer matrix
+    pub fn update_state_transfer_raw(&self, queue: &wgpu::Queue, data: &[f32]) {
+        queue.write_buffer(&self.state_transfer_buf, 0, bytemuck::cast_slice(data));
+    }
+
+    /// Upload a raw flat interaction matrix
+    pub fn update_interaction_raw(&self, queue: &wgpu::Queue, data: &[f32]) {
+        queue.write_buffer(&self.interaction_buffer, 0, bytemuck::cast_slice(data));
+    }
+
     /// Randomise the state transfer matrix and upload it
     pub fn randomise_state_transfer(&self, queue: &wgpu::Queue) {
         let data = generate_state_transfer_matrix();
@@ -502,11 +512,15 @@ fn make_particle(x: f32, y: f32, t: usize, state: f32) -> GpuParticle {
     }
 }
 
-fn generate_state_transfer_matrix() -> Vec<f32> {
+pub fn generate_state_transfer() -> Vec<f32> {
     let mut rng = rand::thread_rng();
     // Small values: state transfer is subtle by default.
     // Mix of positive (amplify) and near-zero (ignore).
     (0..NUM_TYPES * NUM_TYPES)
         .map(|_| rng.gen_range(-0.3f32..0.8))
         .collect()
+}
+
+fn generate_state_transfer_matrix() -> Vec<f32> {
+    generate_state_transfer()
 }

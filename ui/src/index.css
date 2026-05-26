@@ -1,0 +1,327 @@
+@import url('https://fonts.googleapis.com/css2?family=Geist+Mono:wght@300;400;500;600&display=swap');
+
+:root {
+  --bg:        #0a0a0a;
+  --surface:   #111111;
+  --border:    #222222;
+  --text:      #e0e0e0;
+  --text-dim:  #555555;
+  --accent:    #00e5a0;
+  --neg:       #ff4060;
+  --pos:       #00e5a0;
+  --neutral:   #1a1a1a;
+  --font:      'Geist Mono', monospace;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 11px;
+  height: 100vh;
+  overflow: hidden;
+}
+
+#root {
+  height: 100%;
+}
+
+/* ---- Layout ---- */
+.app {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+}
+
+.stream-panel {
+  flex: 1;
+  min-width: 0;
+  background: #0a0a0a;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.stream-placeholder {
+  width: 90%;
+  height: 85%;
+  background: #0d0d0d;
+  border: 1px solid #1a1a1a;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.control-panel {
+  width: 40%;
+  min-width: 380px;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.control-panel::-webkit-scrollbar {
+  width: 4px;
+}
+
+.control-panel::-webkit-scrollbar-track {
+  background: var(--bg);
+}
+
+.control-panel::-webkit-scrollbar-thumb {
+  background: var(--border);
+}
+
+/* ---- Panel sections ---- */
+.panel-section {
+  padding: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.panel-section:last-child {
+  border-bottom: none;
+}
+
+.section-header {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 12px;
+  user-select: none;
+}
+
+/* ---- Matrix Editor ---- */
+.matrix-grid {
+  display: inline-grid;
+  gap: 1px;
+}
+
+.matrix-cell {
+  position: relative;
+  width: 36px;
+  height: 36px;
+  cursor: pointer;
+  user-select: none;
+  border-radius: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.matrix-cell.diagonal {
+  outline: 1px solid var(--text-dim);
+  outline-offset: -1px;
+}
+
+.matrix-cell-value {
+  position: absolute;
+  font-size: 8px;
+  color: rgba(255, 255, 255, 0.85);
+  pointer-events: none;
+  text-shadow: 0 0 2px rgba(0,0,0,0.8);
+}
+
+/* ---- Species Panel ---- */
+.species-row {
+  display: flex;
+  align-items: center;
+  height: 28px;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.species-row:last-child {
+  margin-bottom: 0;
+}
+
+.species-label {
+  font-size: 10px;
+  color: var(--text-dim);
+  width: 24px;
+  text-transform: uppercase;
+  user-select: none;
+}
+
+.species-swatch {
+  width: 20px;
+  height: 20px;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  border-radius: 2px;
+}
+
+.species-swatch::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+.species-swatch::-webkit-color-swatch {
+  border: 1px solid var(--border);
+  border-radius: 2px;
+}
+
+.species-count {
+  font-size: 10px;
+  color: var(--text-dim);
+  margin-left: auto;
+}
+
+/* ---- Param Slider ---- */
+.param-row {
+  margin-bottom: 12px;
+}
+
+.param-row:last-child {
+  margin-bottom: 0;
+}
+
+.param-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 6px;
+}
+
+.param-label {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  user-select: none;
+}
+
+.param-value {
+  font-size: 11px;
+  color: var(--accent);
+  font-family: var(--font);
+}
+
+input[type=range] {
+  -webkit-appearance: none;
+  width: 100%;
+  height: 2px;
+  background: var(--border);
+  outline: none;
+  border-radius: 0;
+}
+
+input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 4px;
+  background: var(--accent);
+  cursor: pointer;
+}
+
+input[type=range]::-moz-range-track {
+  height: 2px;
+  background: var(--border);
+  border: none;
+  border-radius: 0;
+}
+
+input[type=range]::-moz-range-thumb {
+  width: 10px;
+  height: 10px;
+  border-radius: 4px;
+  background: var(--accent);
+  cursor: pointer;
+  border: none;
+}
+
+/* ---- Sim Controls ---- */
+.controls-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.ctrl-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  padding: 6px 12px;
+  cursor: pointer;
+  text-transform: uppercase;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.ctrl-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.ctrl-btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.ctrl-btn:disabled,
+.ctrl-btn.disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.ctrl-btn:disabled:hover,
+.ctrl-btn.disabled:hover {
+  border-color: var(--border);
+  color: var(--text);
+}
+
+/* ---- Presets ---- */
+.presets-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.preset-select {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 10px;
+  padding: 6px 8px;
+  cursor: pointer;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  min-width: 100px;
+}
+
+.preset-select:hover {
+  border-color: var(--accent);
+}
+
+.preset-select option {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.preset-name {
+  font-size: 10px;
+  color: var(--text-dim);
+  letter-spacing: 0.05em;
+}
+
+/* ---- Labels on sections ---- */
+.matrix-label {
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+  user-select: none;
+}

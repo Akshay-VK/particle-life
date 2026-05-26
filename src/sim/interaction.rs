@@ -141,6 +141,16 @@ impl InteractionMatrix {
         // so the sign convention feels natural there.
     }
 
+    // Construct from a flat Vec (used by the HTTP bridge)
+    pub fn from_values(values: Vec<f32>) -> Self {
+        Self { values }
+    }
+
+    // Expose raw values for the HTTP bridge
+    pub fn raw_values(&self) -> &[f32] {
+        &self.values
+    }
+
     // Print the matrix — useful for debugging in the terminal
     pub fn print(&self) {
         println!("Interaction matrix ({NUM_TYPES}×{NUM_TYPES}):");
