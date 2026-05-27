@@ -21,20 +21,17 @@ mod render;
 mod server;
 mod sim;
 
-use std::sync::{
-    atomic::Ordering,
-    Arc,
-};
+use server::{AppState, SharedState};
+use std::sync::{Arc, atomic::Ordering};
+use tokio::sync::RwLock;
 use winit::{
     event::{ElementState, Event, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
     window::WindowBuilder,
 };
-use server::{AppState, SharedState};
-use tokio::sync::RwLock;
 
-const NUM_PARTICLES: u32 = 20_000;
+const NUM_PARTICLES: u32 = 10_000;
 
 fn main() {
     env_logger::init();
@@ -85,6 +82,8 @@ fn main() {
             speed_multiplier: 1.0,
             reset_requested: false,
             randomise_matrix_requested: false,
+            snapshot: Vec::new(),
+            snapshot_world_size: 2.0,
         }),
         dirty: std::sync::atomic::AtomicBool::new(false),
     });
@@ -103,6 +102,9 @@ fn main() {
     // ---- fps counter --------------------------------------------------------
     let mut frames = 0u32;
     let mut fps_timer = std::time::Instant::now();
+
+    // ---- snapshot timer (500ms wall-clock) ----------------------------------
+    let mut last_snapshot_time = std::time::Instant::now();
 
     event_loop
         .run(move |event, elwt| {
@@ -129,13 +131,19 @@ fn main() {
                             gpu_sim.update_params(&renderer.queue);
 
                             // Re-upload matrices
-                            gpu_sim.update_interaction_raw(&renderer.queue, &state.interaction_matrix);
-                            gpu_sim.update_state_transfer_raw(&renderer.queue, &state.state_transfer_matrix);
+                            gpu_sim
+                                .update_interaction_raw(&renderer.queue, &state.interaction_matrix);
+                            gpu_sim.update_state_transfer_raw(
+                                &renderer.queue,
+                                &state.state_transfer_matrix,
+                            );
 
                             // Handle reset
                             if state.reset_requested {
                                 state.reset_requested = false;
-                                let m = sim::InteractionMatrix::from_values(state.interaction_matrix.clone());
+                                let m = sim::InteractionMatrix::from_values(
+                                    state.interaction_matrix.clone(),
+                                );
                                 m.print();
                                 gpu_sim = sim::GpuSim::new(
                                     &renderer.device,
@@ -150,7 +158,10 @@ fn main() {
                                 gpu_sim.params.r_inner = state.min_distance;
                                 gpu_sim.params.friction = state.friction;
                                 gpu_sim.update_params(&renderer.queue);
-                                gpu_sim.update_state_transfer_raw(&renderer.queue, &state.state_transfer_matrix);
+                                gpu_sim.update_state_transfer_raw(
+                                    &renderer.queue,
+                                    &state.state_transfer_matrix,
+                                );
                                 // Sync species colours into the new GpuSim
                                 // (colours are baked into particles at init — reset is the right time)
                                 println!("Reset complete via HTTP");
@@ -184,6 +195,18 @@ fn main() {
                         };
 
                         renderer.render(&mut gpu_sim, paused, speed);
+
+                        // --- Snapshot readback every 500ms ---
+                        if last_snapshot_time.elapsed().as_secs_f32() >= 0.5 {
+                            let snapshot_data =
+                                gpu_sim.read_snapshot(&renderer.device, &renderer.queue);
+                            if !snapshot_data.is_empty() {
+                                let mut state = app_state.state.blocking_write();
+                                state.snapshot = snapshot_data;
+                                state.snapshot_world_size = 2.0;
+                            }
+                            last_snapshot_time = std::time::Instant::now();
+                        }
 
                         frames += 1;
                         if fps_timer.elapsed().as_secs_f32() >= 1.0 {

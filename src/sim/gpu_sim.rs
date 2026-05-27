@@ -101,6 +101,9 @@ pub struct GpuSim {
 
     pub params: SimParams,
     pub num_particles: u32,
+
+    // Pre-allocated staging buffer for particle snapshot readback
+    snapshot_staging: wgpu::Buffer,
 }
 
 impl GpuSim {
@@ -135,8 +138,10 @@ impl GpuSim {
             _pad: 0,
         };
 
-        let buf_usage =
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST;
+        let buf_usage = wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::VERTEX
+            | wgpu::BufferUsages::COPY_DST
+            | wgpu::BufferUsages::COPY_SRC;
 
         let buf0 = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Particle Buffer 0"),
@@ -239,7 +244,13 @@ impl GpuSim {
             &hash,
         );
 
-        // Suppress unused variable warning for queue
+        // Pre-allocated staging buffer for snapshot readback (MAP_READ + COPY_DST)
+        let snapshot_staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Snapshot Staging"),
+            size: (n as u64) * std::mem::size_of::<GpuParticle>() as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         Self {
             buffers: [buf0, buf1],
@@ -254,6 +265,7 @@ impl GpuSim {
             hash_assign_bgs: [hash_assign_bg0, hash_assign_bg1],
             params,
             num_particles: n,
+            snapshot_staging,
         }
     }
 
@@ -425,6 +437,57 @@ impl GpuSim {
                     format: wgpu::VertexFormat::Float32,
                 },
             ],
+        }
+    }
+
+    /// Returns the buffer that was most recently written by compute + rendered.
+    /// Call after render() has advanced the frame index.
+    pub fn snapshot_buffer(&self) -> &wgpu::Buffer {
+        &self.buffers[self.frame_idx % 2]
+    }
+
+    /// Copies the current particle data from the snapshot buffer to the staging
+    /// buffer, maps it, reads positions + species, and returns a compact Vec.
+    /// Blocks the calling thread for ~0.5–2ms via device.poll(Maintain::Wait).
+    pub fn read_snapshot(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Vec<[f32; 3]> {
+        use std::sync::mpsc;
+
+        let snap_buf = self.snapshot_buffer();
+        let buf_size = (self.num_particles as u64) * std::mem::size_of::<GpuParticle>() as u64;
+
+        // Encode copy from snapshot buffer to staging buffer
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Snapshot Copy"),
+        });
+        encoder.copy_buffer_to_buffer(snap_buf, 0, &self.snapshot_staging, 0, buf_size);
+        queue.submit(std::iter::once(encoder.finish()));
+
+        // Map and wait
+        let (tx, rx) = mpsc::channel();
+        self.snapshot_staging
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |r| {
+                let _ = tx.send(r);
+            });
+        device.poll(wgpu::Maintain::Wait);
+
+        match rx.recv() {
+            Ok(Ok(())) => {
+                let data = self.snapshot_staging.slice(..).get_mapped_range();
+                let particles: &[GpuParticle] = bytemuck::cast_slice(&data);
+                let result: Vec<[f32; 3]> = particles
+                    .iter()
+                    .map(|p| [p.position[0], p.position[1], p.ptype])
+                    .collect();
+                drop(data);
+                self.snapshot_staging.unmap();
+                result
+            }
+            _ => Vec::new(),
         }
     }
 }

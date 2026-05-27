@@ -28,6 +28,10 @@ pub struct SharedState {
     pub speed_multiplier: f32,
     pub reset_requested: bool,
     pub randomise_matrix_requested: bool,
+    #[serde(skip)]
+    pub snapshot: Vec<[f32; 3]>,
+    #[serde(skip)]
+    pub snapshot_world_size: f32,
 }
 
 pub struct AppState {
@@ -43,6 +47,7 @@ pub async fn run_server(app_state: Arc<AppState>) {
 
     let app = Router::new()
         .route("/state", get(get_state))
+        .route("/snapshot", get(get_snapshot))
         .route("/params", post(post_params))
         .route("/*_", options(handle_options))
         .layer(cors)
@@ -133,6 +138,19 @@ async fn post_params(
 
     state.dirty.store(true, Ordering::Release);
     StatusCode::OK
+}
+
+async fn get_snapshot(state: State<Arc<AppState>>) -> Json<Value> {
+    let guard = state.state.read().await;
+    let particles = guard.snapshot.clone();
+    let world_size = guard.snapshot_world_size;
+    let num_species = guard.num_species;
+    drop(guard);
+    Json(serde_json::json!({
+        "particles": particles,
+        "world_size": world_size,
+        "num_species": num_species,
+    }))
 }
 
 async fn handle_options() -> StatusCode {

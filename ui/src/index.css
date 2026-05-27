@@ -317,6 +317,24 @@ input[type=range]::-moz-range-thumb {
   letter-spacing: 0.05em;
 }
 
+/* ---- Tabs ---- */
+.tab {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  font-family: var(--font);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 10px 16px;
+  cursor: pointer;
+}
+.tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
 /* ---- Labels on sections ---- */
 .matrix-label {
   font-size: 10px;
