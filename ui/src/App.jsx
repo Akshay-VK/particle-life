@@ -7,6 +7,8 @@ import Presets from './components/Presets';
 import PowerSpectrumCanvas from './components/fft/PowerSpectrumCanvas';
 import RadialProfileCanvas from './components/fft/RadialProfileCanvas';
 import EntropyTimeSeriesCanvas from './components/fft/EntropyTimeSeriesCanvas';
+import SpeciesSpectraGrid from './components/fft/SpeciesSpectraGrid';
+import ChannelRadialProfiles from './components/fft/ChannelRadialProfiles';
 import { useFftAnalysis } from './hooks/useFftAnalysis';
 
 const API = '/api';
@@ -228,19 +230,39 @@ export default function App() {
           </>
         ) : (
           <>
-            {/* POWER SPECTRUM */}
+            {/* POWER SPECTRUM — all particles */}
             <div className="panel-section">
-              <div className="section-header">POWER SPECTRUM</div>
+              <div className="section-header">POWER SPECTRUM  (all)</div>
               <PowerSpectrumCanvas
                 powerSpectrum2d={fftResult ? fftResult.powerSpectrum2d : null}
                 gridSize={fftResult ? fftResult.gridSize : 256}
               />
             </div>
 
-            {/* RADIAL PROFILE */}
+            {/* SPECIES SPECTRA */}
+            <div className="panel-section">
+              <div className="section-header">SPECIES SPECTRA</div>
+              <SpeciesSpectraGrid
+                channelPowers={fftResult ? fftResult.channelPowers : null}
+                channelEntropies={fftResult ? fftResult.channelEntropies : null}
+                numSpecies={fftResult ? fftResult.numSpecies : 0}
+              />
+            </div>
+
+            {/* RADIAL PROFILES — overlaid */}
+            <div className="panel-section">
+              <div className="section-header">RADIAL PROFILES  (overlaid)</div>
+              <ChannelRadialProfiles
+                channelRadialProfiles={fftResult ? fftResult.channelRadialProfiles : null}
+                channelEntropies={fftResult ? fftResult.channelEntropies : null}
+                numSpecies={fftResult ? fftResult.numSpecies : 0}
+              />
+            </div>
+
+            {/* RADIAL PROFILE — all particles */}
             <div className="panel-section">
               <div className="section-header">
-                RADIAL PROFILE
+                RADIAL PROFILE  (all)
                 {fftResult ? `  H: ${fftResult.spectralEntropy.toFixed(3)}` : ''}
               </div>
               <RadialProfileCanvas
@@ -249,7 +271,7 @@ export default function App() {
               />
             </div>
 
-            {/* SPECTRAL ENTROPY */}
+            {/* SPECTRAL ENTROPY — 60s history */}
             <div className="panel-section">
               <div className="section-header">SPECTRAL ENTROPY  (60s)</div>
               <EntropyTimeSeriesCanvas

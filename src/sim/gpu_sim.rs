@@ -447,13 +447,13 @@ impl GpuSim {
     }
 
     /// Copies the current particle data from the snapshot buffer to the staging
-    /// buffer, maps it, reads positions + species, and returns a compact Vec.
+    /// buffer, maps it, reads positions + species + state, and returns a compact Vec.
     /// Blocks the calling thread for ~0.5–2ms via device.poll(Maintain::Wait).
     pub fn read_snapshot(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-    ) -> Vec<[f32; 3]> {
+    ) -> Vec<[f32; 4]> {
         use std::sync::mpsc;
 
         let snap_buf = self.snapshot_buffer();
@@ -479,9 +479,9 @@ impl GpuSim {
             Ok(Ok(())) => {
                 let data = self.snapshot_staging.slice(..).get_mapped_range();
                 let particles: &[GpuParticle] = bytemuck::cast_slice(&data);
-                let result: Vec<[f32; 3]> = particles
+                let result: Vec<[f32; 4]> = particles
                     .iter()
-                    .map(|p| [p.position[0], p.position[1], p.ptype])
+                    .map(|p| [p.position[0], p.position[1], p.ptype, p.state])
                     .collect();
                 drop(data);
                 self.snapshot_staging.unmap();

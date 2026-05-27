@@ -29,7 +29,7 @@ pub struct SharedState {
     pub reset_requested: bool,
     pub randomise_matrix_requested: bool,
     #[serde(skip)]
-    pub snapshot: Vec<[f32; 3]>,
+    pub snapshot: Vec<[f32; 4]>,
     #[serde(skip)]
     pub snapshot_world_size: f32,
 }
